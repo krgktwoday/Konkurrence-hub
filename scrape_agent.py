@@ -171,6 +171,72 @@ def scrape_url_content(url: str) -> tuple[Optional[str], str]:
     return clean_text, response.url
 
 
+def scrape_with_jina(url: str) -> tuple[Optional[str], str]:
+    """
+    Bruger Jina AI's gratis Reader API til at omgå JavaScript og cookie-bannere.
+    Returnerer den rensede Markdown-tekst.
+    """
+    print(f"[Scraper] Starter avanceret dataindsamling via Jina AI fra: {url}")
+    jina_url = f"https://r.jina.ai/{url}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/markdown"
+    }
+    
+    try:
+        response = requests.get(jina_url, headers=headers, timeout=30)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"[Scraper] Fejl under hentning med Jina AI: {e}")
+        return None, url
+        
+    clean_text = response.text
+    
+    # Begræns teksten for ikke at overbelaste LLM context (ca. 4000 ord)
+    words = clean_text.split()
+    if len(words) > 4000:
+        print(f"[Scraper] Teksten er for lang ({len(words)} ord). Forkorter til de første 4000 ord.")
+        clean_text = " ".join(words[:4000])
+
+    print(f"[Scraper] Succes med Jina AI! Skrabede {len(clean_text)} tegn.")
+    return clean_text, url
+
+
+def scrape_with_instaloader(url: str) -> tuple[Optional[str], str]:
+    """
+    Bruger instaloader til at trække teksten direkte ud fra et Instagram-opslag
+    ved hjælp af dets shortcode.
+    """
+    print(f"[Scraper] Forsøger at trække Instagram-data ud fra: {url}")
+    try:
+        import instaloader
+        L = instaloader.Instaloader(quiet=True)
+        
+        # Find shortcode fra URL'en. Eksempel: https://www.instagram.com/p/DSIYqL_jHq_/
+        match = re.search(r"instagram\.com/(?:p|reel)/([^/?#&]+)", url)
+        if not match:
+            print("[Scraper] Fejl: Kunne ikke finde en gyldig Instagram shortcode i linket.")
+            return None, url
+            
+        shortcode = match.group(1)
+        print(f"[Scraper] Fandt shortcode: {shortcode}. Henter opslag...")
+        
+        post = instaloader.Post.from_shortcode(L.context, shortcode)
+        caption = post.caption
+        
+        if not caption:
+            print("[Scraper] Fandt opslaget, men der var ingen tekst/caption.")
+            return "", url
+            
+        print(f"[Scraper] Succes med Instaloader! Hentede caption på {len(caption)} tegn.")
+        return caption, url
+        
+    except Exception as e:
+        print(f"[Scraper] Fejl under hentning med Instaloader: {e}")
+        print("[Scraper] Tip: Instagram blokerer ofte anonyme anmodninger. Hvis dette sker konstant, kræves der login.")
+        return None, url
+
+
 def clean_and_parse_prize_value(val) -> Optional[int]:
     """
     Sikrer, at præmieværdien konverteres korrekt til et heltal (integer)
