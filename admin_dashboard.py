@@ -10,6 +10,8 @@ from scrape_agent import (
     scrape_with_jina,
     scrape_with_instaloader,
     analyze_with_ollama,
+    analyze_image_with_ollama,
+    verify_url_image_match,
     save_to_supabase,
     OLLAMA_API_URL
 )
@@ -35,8 +37,8 @@ st.markdown("""
 st.markdown('<div class="main-header">Konkurrence Scraper</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Automatisér og validér konkurrencer via AI</div>', unsafe_allow_html=True)
 
-# Opret to faner i brugerfladen
-tab1, tab2 = st.tabs(["🌍 Almindelig Hjemmeside (Jina AI)", "📱 Sociale Medier (Instagram)"])
+# Opret tre faner i brugerfladen
+tab1, tab2, tab3 = st.tabs(["🌍 Almindelig Hjemmeside (Jina AI)", "📱 Sociale Medier (Instagram)", "📸 Billede & URL (Vision)"])
 
 def run_scraping_pipeline(url_input, scrape_method_name):
     st.markdown("---")
@@ -147,3 +149,80 @@ with tab2:
             st.warning("Indsæt venligst et Instagram-link først.")
         else:
             run_scraping_pipeline(url_ig, "instaloader")
+
+
+# --- FANE 3: Billede & URL (Vision) ---
+with tab3:
+    st.write("Brug denne fane hvis de andre fejler. Tag et skærmbillede af konkurrencen og lad AI'en læse det!")
+    url_vision = st.text_input("🔗 Indsæt URL hvor billedet stammer fra:", key="url_vision", placeholder="https://...")
+    uploaded_file = st.file_uploader("📸 Upload dit screendump her", type=["jpg", "jpeg", "png"])
+    
+    if uploaded_file is not None:
+        st.image(uploaded_file, caption="Dit uploadede screendump", use_container_width=True)
+        
+    if st.button("Start Vision Scraper 🚀", key="btn_vision", type="primary", use_container_width=True):
+        if not url_vision or uploaded_file is None:
+            st.warning("Husk at indsætte BÅDE et link og uploade et billede.")
+        else:
+            st.markdown("---")
+            image_bytes = uploaded_file.getvalue()
+            
+            # TRIN 1: FORBEREDELSE
+            with st.status("🔍 Forbereder Vision AI...", expanded=True) as status:
+                st.write("Søger efter model med vision kapacitet...")
+                best_model = select_best_ollama_model(OLLAMA_API_URL)
+                # Hvis brugeren bruger Ollama Vision, er llama3.2-vision eller llava ofte valgt.
+                if not best_model:
+                    status.update(label="❌ Fejl: Kunne ikke finde en model.", state="error")
+                    st.stop()
+                st.write(f"✅ Valgt model: **{best_model}**")
+                status.update(label="✅ AI Forberedt!", state="complete")
+                time.sleep(0.5)
+
+            # TRIN 2: VERIFICER MATCH MELLEM URL OG BILLEDE
+            with st.status("🕵️ Verificerer billede og URL...", expanded=True) as status:
+                st.write("AI vurderer om billedet stammer fra URL'en...")
+                is_match = verify_url_image_match(best_model, image_bytes, url_vision)
+                if not is_match:
+                    st.warning("⚠️ AI'en vurderer at dette billede umiddelbart IKKE stammer fra det angivne link. Fortsætter dog alligevel...")
+                else:
+                    st.write("✅ Billede og URL lader til at matche!")
+                status.update(label="✅ Verifikation fuldført!", state="complete")
+                time.sleep(0.5)
+
+            # TRIN 3: VISION ANALYSE
+            with st.status("🧠 AI analyserer dit billede...", expanded=True) as status:
+                st.write("Læser tekst og tilbud fra billedet. Dette kan tage op til 30 sekunder...")
+                details = analyze_image_with_ollama(best_model, image_bytes, url_vision)
+                
+                if not details:
+                    status.update(label="❌ Fejl: Vision-analysen mislykkedes. (Mangler modellen vision kapacitet?)", state="error")
+                    st.stop()
+
+                if not details.is_competition:
+                    status.update(label="⚠️ AI vurderede ud fra billedet, at dette IKKE er en konkurrence.", state="error")
+                    st.stop()
+
+                st.write("✅ Data trukket ud af billedet!")
+                
+                col1, col2 = st.columns(2)
+                col1.metric("Titel", details.title if details.title else "Ukendt")
+                col2.metric("Præmieværdi", f"{details.prize_value} kr." if details.prize_value else "Ukendt")
+                st.write("**Kategori:**", details.category)
+                
+                with st.expander("Se rå JSON-data fra AI"):
+                    st.json(details.model_dump())
+                
+                status.update(label="✅ Analyse fuldført!", state="complete")
+                time.sleep(0.5)
+
+            # TRIN 4: PUBLICERING
+            with st.status("☁️ Publicerer til din live hjemmeside...", expanded=True) as status:
+                st.write("Uploader til Supabase...")
+                success = save_to_supabase(details)
+                
+                if success:
+                    status.update(label="✅ Succes! Konkurrencen er nu LIVE.", state="complete")
+                    st.balloons()
+                else:
+                    status.update(label="❌ Fejl: Kunne ikke gemme i databasen.", state="error")

@@ -11,6 +11,7 @@ import sys
 import json
 import argparse
 import requests
+import base64
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -178,13 +179,8 @@ def scrape_with_jina(url: str) -> tuple[Optional[str], str]:
     """
     print(f"[Scraper] Starter avanceret dataindsamling via Jina AI fra: {url}")
     jina_url = f"https://r.jina.ai/{url}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/markdown"
-    }
-    
     try:
-        response = requests.get(jina_url, headers=headers, timeout=30)
+        response = requests.get(jina_url, timeout=30)
         response.raise_for_status()
     except Exception as e:
         print(f"[Scraper] Fejl under hentning med Jina AI: {e}")
@@ -378,6 +374,135 @@ def analyze_with_ollama(model_name: str, text: str, source_link: str) -> Optiona
     except Exception as e:
         print(f"[Ollama] Fejl ved parsing eller validering af AI-svar: {e}")
         print(f"Modtaget råt svar: {response_content}")
+        return None
+
+
+def verify_url_image_match(model_name: str, image_bytes: bytes, url: str) -> bool:
+    """
+    Spørger Vision AI'en om billedet (screendump) ser ud til at stamme fra den angivne URL.
+    Returnerer True hvis det er et match, ellers False.
+    """
+    print(f"[Vision] Verificerer match mellem billede og URL ({url}) med model '{model_name}'...")
+    
+    b64_image = base64.b64encode(image_bytes).decode("utf-8")
+    
+    prompt = (
+        f"Du er en sikkerhedsassistent. Her er et skærmbillede. Brugeren hævder, "
+        f"at dette billede stammer fra websiden: {url}.\n"
+        f"Kig på billedet (logoer, tekst, kontekst). Er det overvejende sandsynligt, "
+        f"at billedet rent faktisk er taget på denne URL? Svar udelukkende 'ja' eller 'nej'."
+    )
+    
+    payload = {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+                "images": [b64_image]
+            }
+        ],
+        "options": {
+            "temperature": 0.0
+        },
+        "stream": False
+    }
+    
+    try:
+        response = requests.post(f"{OLLAMA_API_URL}/api/chat", json=payload, timeout=60)
+        response.raise_for_status()
+        content = response.json().get("message", {}).get("content", "").strip().lower()
+        print(f"[Vision] Match-vurdering fra AI: {content}")
+        if "ja" in content or "yes" in content:
+            return True
+        return False
+    except Exception as e:
+        print(f"[Vision] Fejl under verifikation: {e}")
+        # Vi tillader det alligevel, da AI kan være i tvivl, og fejlen kan være netværksrelateret
+        return True
+
+
+def analyze_image_with_ollama(model_name: str, image_bytes: bytes, source_link: str) -> Optional[CompetitionDetails]:
+    """
+    Sender et screendump til Ollama Vision for at udtrække strukturerede data om en konkurrence.
+    """
+    print(f"[Vision] Analyserer billede med modellen '{model_name}'...")
+    
+    b64_image = base64.b64encode(image_bytes).decode("utf-8")
+    
+    system_prompt = (
+        "Du er en præcis AI-agent, der analyserer skærmbilleder af konkurrencer på sociale medier eller websider.\n"
+        "Din opgave er at trække konkurrencedata direkte ud af teksten og grafikken på billedet.\n\n"
+        "Regler for udtrækning:\n"
+        "1. Sæt 'is_competition' til true, hvis billedet overhovedet viser en konkurrence, lodtrækning eller giveaway.\n"
+        "2. Sæt 'title' til en dækkende overskrift baseret på hvad man kan vinde.\n"
+        "3. Sæt 'category' til 'Rejser', 'Elektronik', 'Gavekort', 'Kontanter' eller 'Andet'.\n"
+        "4. Sæt 'prize_value' til præmieværdien som et RENT HELTAL (integer) (f.eks. 'værdi 4000 kr' -> 4000). Sæt til null, hvis ikke oplyst.\n"
+        f"5. Sæt 'link' til: {source_link}\n\n"
+        "Returner et gyldigt JSON-objekt."
+    )
+    
+    json_schema = {
+        "type": "object",
+        "properties": {
+            "is_competition": {"type": "boolean"},
+            "title": {"type": ["string", "null"]},
+            "category": {"type": ["string", "null"]},
+            "prize_value": {"type": ["integer", "null"]},
+            "link": {"type": ["string", "null"]}
+        },
+        "required": ["is_competition", "title", "category", "prize_value", "link"]
+    }
+    
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": "Analysér dette billede og returner JSON data for konkurrencen.",
+                "images": [b64_image]
+            }
+        ],
+        "format": json_schema,
+        "options": {
+            "temperature": 0.0
+        },
+        "stream": False
+    }
+    
+    response_content = ""
+    try:
+        url = f"{OLLAMA_API_URL}/api/chat"
+        response = requests.post(url, json=payload, timeout=90)
+        if response.status_code == 200:
+            response_content = response.json().get("message", {}).get("content", "")
+        else:
+            print(f"[Vision] Skema-kald fejlede. Status {response.status_code}. Tester uden skema...")
+    except Exception as e:
+        print(f"[Vision] Fejl: {e}")
+
+    # Fallback
+    if not response_content:
+        payload["format"] = "json"
+        try:
+            response = requests.post(f"{OLLAMA_API_URL}/api/chat", json=payload, timeout=90)
+            response.raise_for_status()
+            response_content = response.json().get("message", {}).get("content", "")
+        except Exception as e:
+            print(f"[Vision] Alvorlig fejl i Vision kald: {e}")
+            return None
+
+    if not response_content:
+        print("[Vision] Modtog intet svar.")
+        return None
+
+    try:
+        parsed_data = json.loads(response_content.strip())
+        parsed_data["prize_value"] = clean_and_parse_prize_value(parsed_data.get("prize_value"))
+        return CompetitionDetails(**parsed_data)
+    except Exception as e:
+        print(f"[Vision] Fejl ved parsing af AI-svar: {e}")
         return None
 
 
